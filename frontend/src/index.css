@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-100 text-slate-800 m-0 p-0 font-sans antialiased overflow-x-hidden;
+  }
+}
+
+/* Ludo Cell Styling */
+.board-cell {
+  @apply w-12 h-12 sm:w-16 sm:h-16 md:w-20 md:h-20 bg-white border border-slate-300 flex flex-wrap items-center justify-center p-1 gap-1 relative;
+  transition: filter 0.2s;
+}
+
+.board-cell:hover {
+  filter: brightness(0.95);
+  cursor: pointer;
+}
+
+/* Safe Zones (The 4 corners + center) */
+.safe-zone {
+  @apply bg-slate-100;
+}
+
+/* Distinct Player Start Bases */
+.home-0 { @apply bg-red-100 border-[3px] border-red-500 shadow-[inset_0_0_15px_rgba(239,68,68,0.2)]; }
+.home-1 { @apply bg-yellow-100 border-[3px] border-yellow-500 shadow-[inset_0_0_15px_rgba(251,191,36,0.2)]; }
+.home-2 { @apply bg-blue-100 border-[3px] border-blue-500 shadow-[inset_0_0_15px_rgba(59,130,246,0.2)]; }
+.home-3 { @apply bg-emerald-100 border-[3px] border-emerald-500 shadow-[inset_0_0_15px_rgba(16,185,129,0.2)]; }
+
+.center-zone {
+  @apply bg-slate-200 border-[3px] border-slate-600 shadow-[inset_0_0_15px_rgba(0,0,0,0.1)];
+}

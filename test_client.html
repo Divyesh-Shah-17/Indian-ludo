@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chauka Bara — Test Client</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --card: #1a1d27;
+            --border: #2a2d3a;
+            --accent: #6c5ce7;
+            --accent2: #00cec9;
+            --text: #e0e0e0;
+            --dim: #888;
+            --success: #00b894;
+            --error: #e17055;
+            --warn: #fdcb6e;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg); color: var(--text);
+            padding: 16px; min-height: 100vh;
+        }
+        h1 { font-size: 1.3rem; margin-bottom: 12px; color: var(--accent2); }
+        .status-bar {
+            display: flex; gap: 12px; align-items: center;
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 10px 16px; margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .status-bar .label { color: var(--dim); font-size: 0.8rem; }
+        .status-bar .value { font-weight: 600; font-size: 0.95rem; }
+        .status-bar .value.connected { color: var(--success); }
+        .status-bar .value.my-turn { color: var(--warn); }
+        #turn-counter { color: var(--accent); }
+        .log-container {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 12px; height: calc(100vh - 160px);
+            overflow-y: auto; font-family: 'Cascadia Code', 'Consolas', monospace;
+            font-size: 0.82rem; line-height: 1.5;
+        }
+        .log-entry { padding: 2px 0; border-bottom: 1px solid #1e2030; }
+        .log-entry .ts { color: var(--dim); margin-right: 8px; }
+        .log-entry.event-error { color: var(--error); }
+        .log-entry.event-dice_rolled { color: var(--warn); }
+        .log-entry.event-piece_moved { color: var(--accent2); }
+        .log-entry.event-turn_changed { color: var(--accent); }
+        .log-entry.event-game_started { color: var(--success); font-weight: 600; }
+        .log-entry.event-game_over { color: var(--success); font-weight: 700; }
+        .log-entry.event-auto { color: #a29bfe; }
+    </style>
+</head>
+<body>
+
+<h1 id="title">Chauka Bara Test Client</h1>
+
+<div class="status-bar">
+    <div><span class="label">Status:</span> <span id="conn-status" class="value">Connecting...</span></div>
+    <div><span class="label">Room:</span> <span id="room-code" class="value">—</span></div>
+    <div><span class="label">Player:</span> <span id="player-id" class="value">—</span></div>
+    <div><span class="label">Turn:</span> <span id="current-turn" class="value">—</span></div>
+    <div><span class="label">My Turns:</span> <span id="turn-counter" class="value">0</span></div>
+    <div><span class="label">State:</span> <span id="game-state" class="value">IDLE</span></div>
+</div>
+
+<div class="log-container" id="log"></div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+(function() {
+    // ── Parse URL params ────────────────────────────────────────────────
+    const params = new URLSearchParams(window.location.search);
+    const autoMode     = params.get("auto") === "true";
+    const paramRoom    = params.get("room") || "";
+    const paramPlayer  = parseInt(params.get("player") || "0", 10);
+    const isCreator    = params.get("create") === "true";
+    const targetTurns  = parseInt(params.get("turns") || "10", 10);
+
+    // ── State ───────────────────────────────────────────────────────────
+    let myPlayerId     = null;
+    let myTurnCount    = 0;
+    let roomCode       = null;
+    let gameState      = null;
+    let pendingRoll    = null;
+    let isMyTurn       = false;
+
+    const AUTO_DELAY   = 150;  // ms between auto-actions
+
+    // ── UI refs ─────────────────────────────────────────────────────────
+    const $log         = document.getElementById("log");
+    const $connStatus  = document.getElementById("conn-status");
+    const $roomCode    = document.getElementById("room-code");
+    const $playerId    = document.getElementById("player-id");
+    const $currentTurn = document.getElementById("current-turn");
+    const $turnCounter = document.getElementById("turn-counter");
+    const $gameState   = document.getElementById("game-state");
+    const $title       = document.getElementById("title");
+
+    function logEvent(type, msg) {
+        const el = document.createElement("div");
+        el.className = "log-entry event-" + type;
+        const ts = new Date().toLocaleTimeString("en-GB");
+        el.innerHTML = `<span class="ts">[${ts}]</span> <strong>${type}</strong>: ${msg}`;
+        $log.appendChild(el);
+        $log.scrollTop = $log.scrollHeight;
+    }
+
+    function updateUI() {
+        $roomCode.textContent   = roomCode || "—";
+        $playerId.textContent   = myPlayerId !== null ? `P${myPlayerId + 1}` : "—";
+        $turnCounter.textContent = myTurnCount;
+        if (gameState) {
+            $currentTurn.textContent = `P${gameState.current_turn + 1}`;
+            $currentTurn.className = "value" + (isMyTurn ? " my-turn" : "");
+        }
+    }
+
+    // ── Socket.io Connection ────────────────────────────────────────────
+    const socket = io("http://localhost:8765", {
+        transports: ["websocket", "polling"],
+    });
+
+    socket.on("connect", () => {
+        $connStatus.textContent = "Connected";
+        $connStatus.className = "value connected";
+        logEvent("connect", `Session: ${socket.id}`);
+
+        // Auto join/create
+        if (autoMode) {
+            if (isCreator) {
+                socket.emit("create_room", {});
+            } else if (paramRoom) {
+                setTimeout(() => {
+                    socket.emit("join_room", { code: paramRoom });
+                }, 300);
+            }
+        }
+    });
+
+    socket.on("disconnect", () => {
+        $connStatus.textContent = "Disconnected";
+        $connStatus.className = "value";
+        logEvent("disconnect", "Lost connection to server");
+    });
+
+    // ── Room Events ─────────────────────────────────────────────────────
+
+    socket.on("room_created", (data) => {
+        roomCode = data.code;
+        myPlayerId = data.player_id;
+        $gameState.textContent = "WAITING";
+        logEvent("room_created", `Code: ${roomCode} | I am P${myPlayerId + 1}`);
+        $title.textContent = `Chauka Bara — P${myPlayerId + 1} [${roomCode}]`;
+        updateUI();
+    });
+
+    socket.on("room_joined", (data) => {
+        roomCode = data.code;
+        myPlayerId = data.player_id;
+        $gameState.textContent = "WAITING";
+        logEvent("room_joined", `Joined ${roomCode} as P${myPlayerId + 1}`);
+        $title.textContent = `Chauka Bara — P${myPlayerId + 1} [${roomCode}]`;
+        updateUI();
+    });
+
+    socket.on("player_joined", (data) => {
+        logEvent("player_joined", `P${data.player_id + 1} joined (${data.player_count}/4)`);
+    });
+
+    socket.on("player_left", (data) => {
+        logEvent("player_left", `P${data.player_id + 1} left`);
+    });
+
+    // ── Game Events ─────────────────────────────────────────────────────
+
+    socket.on("game_started", (data) => {
+        gameState = data.game_state;
+        $gameState.textContent = "PLAYING";
+        logEvent("game_started", "All 4 players connected — game started!");
+        updateUI();
+    });
+
+    socket.on("dice_rolled", (data) => {
+        pendingRoll = data.value;
+        const extra = data.extra_turn ? " (EXTRA TURN!)" : "";
+        logEvent("dice_rolled", `P${data.player_id + 1} rolled ${data.value}${extra}`);
+
+        // Auto-mode: pick a piece to move
+        if (autoMode && data.player_id === myPlayerId) {
+            setTimeout(() => autoPickPiece(), AUTO_DELAY);
+        }
+    });
+
+    socket.on("piece_moved", (data) => {
+        const r = data.result;
+        const status = r.success ? "OK" : "FAIL";
+        const cap = r.captured ? ` | Captured P${r.captured.player_id + 1}-${r.captured.piece_id}` : "";
+        logEvent("piece_moved",
+            `P${data.player_id + 1} piece ${data.piece_id} [${status}]: ${r.message}${cap}`);
+
+        // If move failed in auto mode, try next piece
+        if (autoMode && data.player_id === myPlayerId && !r.success) {
+            setTimeout(() => autoPickPiece(data.piece_id + 1), AUTO_DELAY);
+        }
+    });
+
+    socket.on("state_update", (data) => {
+        gameState = data.game_state;
+        updateUI();
+    });
+
+    socket.on("turn_changed", (data) => {
+        isMyTurn = (data.player_id === myPlayerId);
+        if (gameState) gameState.current_turn = data.player_id;
+        logEvent("turn_changed", `Now P${data.player_id + 1}'s turn` + (isMyTurn ? " (ME)" : ""));
+        updateUI();
+
+        // Auto-mode: roll dice if it's my turn
+        if (autoMode && isMyTurn) {
+            // Check if we've reached target turns
+            if (myTurnCount >= targetTurns) {
+                logEvent("auto", `Reached ${targetTurns} turns — stopping auto-play`);
+                return;
+            }
+            pendingRoll = null;
+            setTimeout(() => {
+                logEvent("auto", "Auto-rolling dice...");
+                socket.emit("roll_dice", {});
+            }, AUTO_DELAY);
+        }
+    });
+
+    socket.on("game_over", (data) => {
+        $gameState.textContent = "FINISHED";
+        logEvent("game_over", `Player ${data.winner_id + 1} WINS!`);
+    });
+
+    socket.on("error", (data) => {
+        logEvent("error", data.message);
+    });
+
+    // ── Auto-play Logic ─────────────────────────────────────────────────
+
+    let autoAttempts = 0;
+    const MAX_AUTO_ATTEMPTS = 10;
+
+    function autoPickPiece(startIdx) {
+        startIdx = startIdx || 0;
+        if (!gameState || myPlayerId === null) return;
+
+        const myPlayerState = gameState.players[myPlayerId];
+        if (!myPlayerState) return;
+
+        const pieces = myPlayerState.pieces;
+
+        // Try each piece starting from startIdx
+        for (let i = startIdx; i < pieces.length; i++) {
+            const p = pieces[i];
+            if (p.state === "FINISHED") continue;
+
+            logEvent("auto", `Trying piece ${i}...`);
+            autoAttempts++;
+            socket.emit("move_piece", { piece_id: i });
+            return;
+        }
+
+        // No more pieces to try — skip turn
+        logEvent("auto", "No valid moves — skipping turn");
+        myTurnCount++;
+        $turnCounter.textContent = myTurnCount;
+        autoAttempts = 0;
+        socket.emit("skip_turn", {});
+    }
+
+    // Track successful turns from state_update
+    socket.on("state_update", (data) => {
+        // Count my turns from room data
+        if (data.room && data.room.players) {
+            const mySlot = data.room.players[myPlayerId];
+            if (mySlot) {
+                myTurnCount = mySlot.turns_taken;
+                $turnCounter.textContent = myTurnCount;
+                autoAttempts = 0;
+            }
+        }
+    });
+
+})();
+</script>
+</body>
+</html>
